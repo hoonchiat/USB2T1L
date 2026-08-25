@@ -1,1 +1,159 @@
-# USB2T1L
+# STM32F407 ⇄ ADIN2111 ⇄ USB Ethernet Bridge (FreeRTOS)
+
+Firmware that turns an **STM32F407** into a transparent bridge between an
+**Analog Devices ADIN2111** 10BASE‑T1L Ethernet MAC‑PHY (over SPI) and a
+**Linux host over USB 2.0**. The device enumerates as a **CDC‑ECM** network
+adapter, so Linux binds it with the in‑tree `cdc_ether` driver and it shows up
+as an ordinary Ethernet interface (`enx…` / `usb0`) — no custom host driver.
+
+```
+     10BASE-T1L (SPE)          SPI1 @ 21 MHz            USB 2.0 Full Speed
+   ┌───────────────┐   INT   ┌───────────────────┐   Bulk IN/OUT  ┌───────────┐
+   │   ADIN2111    │◀──────▶│    STM32F407       │◀─────────────▶│ Linux host │
+   │ 2× SPE PHY +  │  SPI    │  FreeRTOS bridge   │  CDC-ECM +    │ cdc_ether │
+   │ switch + MAC  │◀──────▶│  (this firmware)   │  Interrupt IN │  → ethX    │
+   └───────────────┘   RST   └───────────────────┘  (link notify) └───────────┘
+```
+
+## How it works
+
+Two independent data paths, each with its own pre‑allocated frame‑buffer pool,
+run as FreeRTOS tasks:
+
+| Direction | Path |
+|-----------|------|
+| **Uplink** (wire → host) | ADIN asserts `INT` → `net_rx_task` reads frames from the ADIN RX FIFO over SPI → transmits them on the USB **bulk IN** endpoint (CDC‑ECM). |
+| **Downlink** (host → wire) | Host sends a frame on the USB **bulk OUT** endpoint (zero‑copy into a pool buffer) → `net_tx_task` writes it into the ADIN TX FIFO over SPI. |
+
+A third `link_task` polls the PHY link state and reports it to the host over
+the ECM **interrupt IN** endpoint (`NETWORK_CONNECTION` /
+`CONNECTION_SPEED_CHANGE`), so the host's carrier tracks the SPE link.
+
+The ADIN2111 is configured to append/verify the Ethernet FCS in hardware and to
+forward unknown‑destination and broadcast frames to the SPI host, so the bridge
+behaves like a promiscuous NIC. The device's unicast MAC (advertised to the USB
+host **and** programmed into the ADIN address filter) is derived from the STM32
+96‑bit unique ID, so multiple boards don't collide.
+
+## Repository layout
+
+```
+USB2T1L/                (repository root)
+├── Core/               MCU bring-up
+│   ├── Inc/app_config.h    ← EDIT THIS: pin map, clocks, buffer sizes, MAC
+│   ├── Src/bsp.c           clocks (168 MHz), SPI1, GPIO, LEDs
+│   ├── Src/main.c          boot + FreeRTOS start + kernel hooks
+│   ├── Src/stm32f4xx_it.c  ISRs (EXTI for ADIN INT, USB OTG, TIM6 tick)
+│   └── Src/stm32f4xx_hal_timebase_tim.c   HAL tick on TIM6 (SysTick → RTOS)
+├── Drivers/ADIN2111/   Portable ADIN2111/ADIN1110 driver + STM32 SPI port
+├── Net/                Frame pool + the bridge tasks/queues
+├── Middlewares/USB_ECM/ CDC-ECM class, descriptors, PCD glue
+├── App/usb_device.c    USB device core bring-up
+├── config/             FreeRTOSConfig.h, stm32f4xx_hal_conf.h, usbd_conf.h
+├── ldscripts/          STM32F407VGTx linker script
+├── Makefile            build (references STM32CubeF4)
+└── scripts/get_deps.sh fetch STM32CubeF4
+```
+
+## Hardware / wiring
+
+Default pin map (all configurable in `Core/Inc/app_config.h`):
+
+| Signal          | STM32F407 pin | Notes |
+|-----------------|---------------|-------|
+| SPI1 SCK        | PA5           | AF5, ≤ 25 MHz (21 MHz default) |
+| SPI1 MISO       | PA6           | AF5 |
+| SPI1 MOSI       | PA7           | AF5 |
+| ADIN CS         | PA4           | GPIO, software NSS (active low) |
+| ADIN INT        | PC4           | EXTI4, falling edge, pull‑up (INT is open‑drain, active low) |
+| ADIN RST        | PC5           | GPIO, active low |
+| USB OTG_FS D−   | PA11          | AF10 → host USB |
+| USB OTG_FS D+   | PA12          | AF10 → host USB |
+| Link LED        | PD12          | optional (STM32F4‑Discovery green) |
+| Activity LED    | PD14          | optional (STM32F4‑Discovery red) |
+
+The ADIN2111 SPI must be strapped for the **generic** (non‑OPEN‑Alliance) SPI
+protocol. If you strap it for SPI CRC, keep `ADIN_SPI_USE_CRC = 1`
+(default); otherwise set it to `0` — the two **must** match or every SPI
+transaction fails.
+
+## Building
+
+Requires the GNU Arm Embedded toolchain (`arm-none-eabi-gcc`) and `make`.
+
+```sh
+make deps        # clone STM32CubeF4 into third_party/ (once)
+make             # -> build/stm32f407-adin2111-ecm.{elf,hex,bin}
+```
+
+Point at an existing Cube checkout instead of cloning:
+
+```sh
+make CUBE=/path/to/STM32CubeF4
+```
+
+Flash with an ST‑LINK (uses `openocd.cfg`):
+
+```sh
+make flash
+```
+
+## Bring‑up on Linux
+
+Plug the STM32 USB port into the Linux host. You should see:
+
+```sh
+$ dmesg | tail
+cdc_ether 1-1:1.0 usb0: register 'cdc_ether' ... CDC Ethernet Device
+$ ip link show usb0
+usb0: <BROADCAST,MULTICAST> mtu 1500 ... link/ether 02:11:xx:xx:xx:xx
+```
+
+Bring it up and use it like any NIC:
+
+```sh
+sudo ip link set usb0 up
+sudo ip addr add 192.0.2.2/24 dev usb0     # or dhclient usb0
+ping 192.0.2.1                              # a peer on the 10BASE-T1L segment
+```
+
+The interface name may be `usb0` or a predictable `enxNN…` name derived from
+the advertised MAC, depending on your distro's `systemd-udev` naming rules.
+
+## Tuning
+
+Everything worth changing lives in `Core/Inc/app_config.h`:
+
+- **Clocks** — `BOARD_HSE_HZ` and the PLL factors. Defaults assume an 8 MHz
+  crystal; the PLL yields 168 MHz SYSCLK and exactly 48 MHz for USB.
+- **Pins / SPI instance** — remap any signal, change `ADIN_SPI_PRESCALER`.
+- **Buffering** — `NET_RX_POOL_COUNT` / `NET_TX_POOL_COUNT` trade RAM for burst
+  tolerance (each buffer is `NET_MAX_FRAME_LEN` ≈ 1.5 KiB).
+- **MAC address** — override `BOARD_MAC_*`, or change `bsp_get_mac_address()`.
+- **Task priorities / stacks** — the `TASK_*` macros.
+
+## Design notes & limitations
+
+- **Full Speed only.** The STM32F407 OTG_FS PHY is USB 2.0 Full Speed
+  (12 Mb/s). That comfortably exceeds the 10 Mb/s 10BASE‑T1L line rate, so USB
+  is not the bottleneck. (An STM32F407 has no HS PHY; use an F411/F7/H7 with
+  ULPI if you need USB HS.)
+- **One in‑flight uplink frame.** `net_rx_task` sends each frame and waits for
+  the USB transfer to complete before the next. Simple and correct; more than
+  enough for 10 Mb/s. Raise throughput by switching the SPI port to DMA and/or
+  pipelining bulk‑IN transfers.
+- **CDC‑ECM** was chosen for zero‑driver Linux support. For Windows you'd add
+  RNDIS or NCM; the class layer (`usbd_ecm.c`) is the only part that changes.
+- **VID/PID** in `usbd_desc.h` are placeholders (ST's VID + an arbitrary PID).
+  Replace them with a pair you're licensed to ship.
+- The ADIN2111 register map / SPI generic protocol in `Drivers/ADIN2111` was
+  implemented against the ADI datasheet and cross‑checked with the mainline
+  Linux `adin1110` driver and ADI's no‑OS driver. The same driver also
+  supports the single‑port **ADIN1110** (auto‑detected by PHY ID).
+
+## License
+
+Application code (`Core`, `Net`, `Drivers/ADIN2111`, `Middlewares/USB_ECM`,
+`App`) is provided as‑is for your project. The STM32 HAL, CMSIS, ST USB Device
+Library and FreeRTOS fetched into `third_party/` carry their own licenses
+(ST Ultimate Liberty / Apache‑2.0 / MIT respectively).

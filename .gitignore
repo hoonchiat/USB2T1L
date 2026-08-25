@@ -1,0 +1,15 @@
+# Build output
+build/
+
+# Fetched dependencies
+third_party/
+
+# Editor / IDE
+*.o
+*.d
+*.lst
+*.su
+*.map
+.vscode/
+.idea/
+*.swp
