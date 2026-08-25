@@ -138,10 +138,20 @@ Everything worth changing lives in `Core/Inc/app_config.h`:
   (12 Mb/s). That comfortably exceeds the 10 Mb/s 10BASE‑T1L line rate, so USB
   is not the bottleneck. (An STM32F407 has no HS PHY; use an F411/F7/H7 with
   ULPI if you need USB HS.)
+- **SPI moves frames by DMA.** Frame‑sized SPI bursts to/from the ADIN2111 run
+  on the SPI TX/RX DMA streams (DMA2); `net_rx_task`/`net_tx_task` block on a
+  completion semaphore instead of busy‑polling the SPI data register, so the
+  CPU is free during the ~0.6 ms per‑frame transfer. Small register accesses
+  (< `ADIN_SPI_DMA_MIN_LEN`) stay on the polled path where DMA setup would cost
+  more than it saves; device bring‑up (before the scheduler) is polled too. Set
+  `ADIN_SPI_USE_DMA = 0` in `app_config.h` to force the fully polled transport.
+  Note the **USB** side cannot use DMA here: the STM32F407 OTG_FS core has no
+  DMA engine (only OTG_HS does), so USB packets are moved by the OTG ISR — this
+  is not a bottleneck at 10 Mb/s. Moving the USB path to DMA would require
+  switching to OTG_HS (different pins/PHY).
 - **One in‑flight uplink frame.** `net_rx_task` sends each frame and waits for
   the USB transfer to complete before the next. Simple and correct; more than
-  enough for 10 Mb/s. Raise throughput by switching the SPI port to DMA and/or
-  pipelining bulk‑IN transfers.
+  enough for 10 Mb/s. Raise throughput further by pipelining bulk‑IN transfers.
 - **CDC‑ECM** was chosen for zero‑driver Linux support. For Windows you'd add
   RNDIS or NCM; the class layer (`usbd_ecm.c`) is the only part that changes.
 - **VID/PID** in `usbd_desc.h` are placeholders (ST's VID + an arbitrary PID).

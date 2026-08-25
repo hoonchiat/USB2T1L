@@ -69,6 +69,25 @@ void OTG_FS_IRQHandler(void)
     HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
 }
 
+#if (ADIN_SPI_USE_DMA)
+/* ADIN2111 SPI DMA streams + SPI error interrupt. The DMA transfer-complete
+ * ISR is what fires HAL_SPI_TxRxCpltCallback -> releases the waiting task. */
+void ADIN_SPI_DMA_TX_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_adin_spi_tx);
+}
+
+void ADIN_SPI_DMA_RX_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_adin_spi_rx);
+}
+
+void ADIN_SPI_IRQHandler(void)
+{
+    HAL_SPI_IRQHandler(&hspi_adin);
+}
+#endif /* ADIN_SPI_USE_DMA */
+
 /* ADIN2111 INT line (falling edge). Expands to e.g. EXTI4_IRQHandler. */
 void ADIN_INT_EXTI_IRQHandler(void)
 {

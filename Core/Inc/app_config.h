@@ -46,6 +46,32 @@
 /* APB2 = 84 MHz. Prescaler 4 -> 21 MHz SCK (ADIN2111 max is 25 MHz).       */
 #define ADIN_SPI_PRESCALER           SPI_BAUDRATEPRESCALER_4
 
+/* Move SPI frame data with DMA so the CPU is not busy-waiting during the
+ * (up to ~0.6 ms) per-frame SPI burst. Set to 0 to fall back to blocking,
+ * polled SPI. SPI1 maps to DMA2: TX = Stream3/Ch3, RX = Stream0/Ch3. */
+#define ADIN_SPI_USE_DMA             1
+#define ADIN_SPI_DMA_CLK_ENABLE()    __HAL_RCC_DMA2_CLK_ENABLE()
+#define ADIN_SPI_DMA_TX_INSTANCE     DMA2_Stream3
+#define ADIN_SPI_DMA_TX_CHANNEL      DMA_CHANNEL_3
+#define ADIN_SPI_DMA_TX_IRQn         DMA2_Stream3_IRQn
+#define ADIN_SPI_DMA_TX_IRQHandler   DMA2_Stream3_IRQHandler
+#define ADIN_SPI_DMA_RX_INSTANCE     DMA2_Stream0
+#define ADIN_SPI_DMA_RX_CHANNEL      DMA_CHANNEL_3
+#define ADIN_SPI_DMA_RX_IRQn         DMA2_Stream0_IRQn
+#define ADIN_SPI_DMA_RX_IRQHandler   DMA2_Stream0_IRQHandler
+/* SPI error interrupt (used by the HAL in DMA mode). */
+#define ADIN_SPI_IRQn                SPI1_IRQn
+#define ADIN_SPI_IRQHandler          SPI1_IRQHandler
+/* NVIC priority for SPI/DMA IRQs. Must be numerically >=
+ * configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY (5) because the completion
+ * callback calls FreeRTOS ...FromISR APIs. */
+#define ADIN_SPI_DMA_IRQ_PRIO        6
+/* Only offload transfers of at least this many bytes to DMA. Small register
+ * accesses (4-8 bytes, done often while draining RX) are faster on the polled
+ * path than a DMA setup + completion-IRQ + task-wake round trip. Frame FIFO
+ * bursts are far larger and are where DMA pays off. */
+#define ADIN_SPI_DMA_MIN_LEN         64u
+
 /* SCK / MISO / MOSI (alternate function pins) */
 #define ADIN_SCK_PORT                GPIOA
 #define ADIN_SCK_PIN                 GPIO_PIN_5
