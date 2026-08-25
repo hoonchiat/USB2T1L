@@ -9,6 +9,7 @@
 #include "net_bridge.h"
 
 #include "adin2111.h"
+#include "adin2111_regs.h"   /* ADIN_MAC_SLOT_FDB_BASE for the learning table */
 #include "adin2111_port_stm32.h"
 #include "usbd_ecm_if.h"
 #include "bsp.h"
@@ -18,11 +19,14 @@
 #include "queue.h"
 #include "semphr.h"
 
+#include <string.h>
+
 /* ------------------------------------------------------------------------- */
 /* Module state                                                              */
 /* ------------------------------------------------------------------------- */
 
 static adin2111_t          s_adin;
+static uint8_t             s_own_mac[6];
 
 static frame_pool_t        s_rx_pool;   /* ADIN -> USB (uplink)    */
 static frame_pool_t        s_tx_pool;   /* USB  -> ADIN (downlink) */
@@ -37,6 +41,100 @@ static volatile bool       s_link_up;
 
 #define ADIN_LOCK()    (void)xSemaphoreTake(s_adin_lock, portMAX_DELAY)
 #define ADIN_UNLOCK()  (void)xSemaphoreGive(s_adin_lock)
+
+/* ------------------------------------------------------------------------- */
+/* Switch-mode learning FDB (host-managed ADIN hardware forwarding table)    */
+/*                                                                           */
+/* The ADIN2111 does not auto-learn: unicast is forwarded port-to-port only  */
+/* for destinations present in its filter table. We learn source addresses   */
+/* from the frames the host does see (broadcast/multicast + frames for us)   */
+/* and program a hardware forwarding entry so later unicast to that node is   */
+/* switched without host involvement. Bounded by the 14 free filter slots.   */
+/* s_fdb and the ADIN table are both protected by s_adin_lock.               */
+/* ------------------------------------------------------------------------- */
+#if (ADIN_DAISY_CHAIN_MODE)
+_Static_assert(NET_FDB_MAX_ENTRIES <=
+                   (ADIN_MAC_FILTER_SLOTS - ADIN_MAC_SLOT_FDB_BASE),
+               "NET_FDB_MAX_ENTRIES exceeds the free ADIN filter slots");
+
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  port;    /* live port where this MAC was last seen (ingress)     */
+    bool     valid;
+    uint32_t stamp;   /* tick of last refresh, for aging / LRU eviction       */
+} fdb_entry_t;
+
+static fdb_entry_t s_fdb[NET_FDB_MAX_ENTRIES];
+
+static inline bool mac_is_group(const uint8_t *m)
+{
+    return (m[0] & 0x01u) != 0u;   /* broadcast/multicast group bit */
+}
+
+/* Learn src@ingress into the FDB and the ADIN table. Caller holds s_adin_lock. */
+static void net_bridge_learn(const uint8_t *src, adin2111_port_t ingress)
+{
+    if (mac_is_group(src) || memcmp(src, s_own_mac, 6) == 0) {
+        return;   /* never learn a group address or our own */
+    }
+    const uint32_t now  = (uint32_t)xTaskGetTickCount();
+    const uint32_t agel = pdMS_TO_TICKS(NET_FDB_AGE_MS);
+
+    /* Pass 1: refresh an existing entry (and reprogram if the node moved). */
+    for (uint32_t i = 0; i < NET_FDB_MAX_ENTRIES; i++) {
+        if (s_fdb[i].valid && memcmp(s_fdb[i].mac, src, 6) == 0) {
+            s_fdb[i].stamp = now;
+            if (s_fdb[i].port != (uint8_t)ingress) {
+                s_fdb[i].port = (uint8_t)ingress;
+                (void)adin2111_fdb_set(&s_adin,
+                        (uint8_t)(ADIN_MAC_SLOT_FDB_BASE + i), src, ingress);
+            }
+            return;
+        }
+    }
+
+    /* Pass 2: choose a slot — a free one, else an aged-out one, else LRU. */
+    int slot = -1;
+    int lru = 0;
+    uint32_t lru_age = 0;
+    for (uint32_t i = 0; i < NET_FDB_MAX_ENTRIES; i++) {
+        if (!s_fdb[i].valid) {
+            slot = (int)i;
+            break;
+        }
+        uint32_t age = now - s_fdb[i].stamp;
+        if (age > agel) {
+            slot = (int)i;   /* stale: reclaim */
+            break;
+        }
+        if (age >= lru_age) {
+            lru_age = age;
+            lru = (int)i;
+        }
+    }
+    if (slot < 0) {
+        slot = lru;   /* table full of fresh entries: evict least-recent */
+    }
+
+    memcpy(s_fdb[slot].mac, src, 6);
+    s_fdb[slot].port  = (uint8_t)ingress;
+    s_fdb[slot].valid = true;
+    s_fdb[slot].stamp = now;
+    (void)adin2111_fdb_set(&s_adin,
+            (uint8_t)(ADIN_MAC_SLOT_FDB_BASE + slot), src, ingress);
+}
+
+/* Look up a destination MAC -> live port, or -1 if unknown. Caller holds lock. */
+static int net_bridge_fdb_lookup(const uint8_t *dst)
+{
+    for (uint32_t i = 0; i < NET_FDB_MAX_ENTRIES; i++) {
+        if (s_fdb[i].valid && memcmp(s_fdb[i].mac, dst, 6) == 0) {
+            return (int)s_fdb[i].port;
+        }
+    }
+    return -1;
+}
+#endif /* ADIN_DAISY_CHAIN_MODE */
 
 /* ------------------------------------------------------------------------- */
 /* Uplink: ADIN -> USB                                                       */
@@ -73,6 +171,14 @@ static void net_rx_task(void *arg)
             adin2111_status_t rc =
                 adin2111_read_frame(&s_adin, f->data, sizeof(f->data),
                                     &len, &port);
+#if (ADIN_DAISY_CHAIN_MODE)
+            /* Learn the source of every frame we see (still under the lock, as
+             * this programs the ADIN table). len >= 12 => dst+src present. */
+            if (rc == ADIN2111_OK && len >= 12u &&
+                s_adin.mode == ADIN2111_MODE_SWITCH) {
+                net_bridge_learn(&f->data[6], port);
+            }
+#endif
             ADIN_UNLOCK();
 
             if (rc != ADIN2111_OK || len == 0u) {
@@ -128,6 +234,21 @@ void net_bridge_downlink_discard_isr(net_frame_t *frame, BaseType_t *woken)
     frame_pool_free_isr(&s_tx_pool, frame, woken);
 }
 
+/* Write one frame out a specific port, retrying briefly if the TX FIFO is full. */
+static void tx_frame_port(net_frame_t *f, adin2111_port_t port)
+{
+    for (int attempt = 0; attempt < 4; attempt++) {
+        ADIN_LOCK();
+        adin2111_status_t rc =
+            adin2111_write_frame(&s_adin, port, f->data, f->len);
+        ADIN_UNLOCK();
+        if (rc != ADIN2111_ERR_NOSPACE) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
 static void net_tx_task(void *arg)
 {
     (void)arg;
@@ -139,17 +260,30 @@ static void net_tx_task(void *arg)
         }
         bsp_led_activity();
 
-        /* Host frames egress on port 1. Retry briefly if the TX FIFO is full. */
-        adin2111_status_t rc = ADIN2111_ERR_NOSPACE;
-        for (int attempt = 0; attempt < 4; attempt++) {
-            ADIN_LOCK();
-            rc = adin2111_write_frame(&s_adin, ADIN2111_PORT_1, f->data, f->len);
-            ADIN_UNLOCK();
-            if (rc != ADIN2111_ERR_NOSPACE) {
-                break;
+#if (ADIN_DAISY_CHAIN_MODE)
+        if (s_adin.mode == ADIN2111_MODE_SWITCH) {
+            /* Choose the egress port for host-injected traffic:
+             *  - broadcast/multicast, or unknown unicast -> flood both ports
+             *    (so it reaches either direction of the chain);
+             *  - learned unicast -> the single port toward that node. */
+            int p = -1;
+            if (!mac_is_group(f->data)) {
+                ADIN_LOCK();
+                p = net_bridge_fdb_lookup(f->data);   /* dst MAC = f->data[0..5] */
+                ADIN_UNLOCK();
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
+            if (p < 0) {
+                tx_frame_port(f, ADIN2111_PORT_1);
+                tx_frame_port(f, ADIN2111_PORT_2);
+            } else {
+                tx_frame_port(f, (adin2111_port_t)p);
+            }
+            frame_pool_free(&s_tx_pool, f);
+            continue;
         }
+#endif
+        /* Endpoint mode: single-port egress. */
+        tx_frame_port(f, ADIN2111_PORT_1);
         frame_pool_free(&s_tx_pool, f);
     }
 }
@@ -189,6 +323,24 @@ static void link_task(void *arg)
             have_sent = true;
         }
 
+#if (ADIN_DAISY_CHAIN_MODE)
+        /* Age out stale learned entries so their hardware forwarding slot is
+         * released and traffic isn't sent toward a node that has gone away. */
+        if (s_adin.mode == ADIN2111_MODE_SWITCH) {
+            uint32_t now  = (uint32_t)xTaskGetTickCount();
+            uint32_t agel = pdMS_TO_TICKS(NET_FDB_AGE_MS);
+            ADIN_LOCK();
+            for (uint32_t i = 0; i < NET_FDB_MAX_ENTRIES; i++) {
+                if (s_fdb[i].valid && (now - s_fdb[i].stamp) > agel) {
+                    s_fdb[i].valid = false;
+                    (void)adin2111_fdb_clear(&s_adin,
+                            (uint8_t)(ADIN_MAC_SLOT_FDB_BASE + i));
+                }
+            }
+            ADIN_UNLOCK();
+        }
+#endif
+
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
@@ -216,13 +368,15 @@ bool net_bridge_init(void)
     /* Bring up the ADIN2111 over SPI (no concurrency yet: tasks not created). */
     adin2111_hal_t hal;
     adin2111_port_stm32_get_hal(&hal);
-    if (adin2111_init(&s_adin, &hal, (ADIN_SPI_USE_CRC != 0)) != ADIN2111_OK) {
+    adin2111_mode_t mode = (ADIN_DAISY_CHAIN_MODE != 0) ? ADIN2111_MODE_SWITCH
+                                                        : ADIN2111_MODE_ENDPOINT;
+    if (adin2111_init(&s_adin, &hal, (ADIN_SPI_USE_CRC != 0), mode)
+            != ADIN2111_OK) {
         return false;
     }
 
-    uint8_t mac[6];
-    bsp_get_mac_address(mac);
-    (void)adin2111_set_host_mac(&s_adin, mac);
+    bsp_get_mac_address(s_own_mac);
+    (void)adin2111_set_host_mac(&s_adin, s_own_mac);
 
     /* Register + start the USB ECM class (creates the OS objects it needs). */
     usbd_ecm_if_register();

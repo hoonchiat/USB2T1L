@@ -9,7 +9,7 @@
  * Typical use from the network bridge:
  *
  *     adin2111_t dev;
- *     adin2111_init(&dev, &hal);              // reset + configure + verify id
+ *     adin2111_init(&dev, &hal, true, ADIN2111_MODE_SWITCH);  // reset+verify
  *     adin2111_set_host_mac(&dev, mac);       // frames for us -> host FIFO
  *     ...
  *     // in the ISR-woken RX task:
@@ -50,6 +50,18 @@ typedef enum {
     ADIN2111_PORT_2 = 1,
 } adin2111_port_t;
 
+/* Forwarding behaviour selected at init. */
+typedef enum {
+    /* Endpoint / promiscuous NIC: everything (unknown unicast + group) is
+     * delivered to the host; nothing is switched port-to-port. */
+    ADIN2111_MODE_ENDPOINT = 0,
+    /* Daisy-chain switch: broadcast/multicast are flooded to the other T1L
+     * port and copied to the host; frames for us go to the host; learned
+     * unicast is forwarded port-to-port in hardware (cut-through). The host
+     * populates the forwarding table via adin2111_fdb_set(). */
+    ADIN2111_MODE_SWITCH   = 1,
+} adin2111_mode_t;
+
 /**
  * Platform hardware access. Provided by the caller (see adin2111_port_stm32.c).
  * All SPI transfers are full duplex and happen with CS already asserted by the
@@ -69,22 +81,42 @@ typedef struct {
 
 /** Driver instance. Treat as opaque; fields are for the driver's use. */
 typedef struct {
-    adin2111_hal_t hal;
-    bool     crc_enabled;   /* SPI generic-protocol CRC-8 on each transaction */
-    uint32_t phy_id;        /* value read from PHYID register                 */
-    uint8_t  num_ports;     /* 1 (ADIN1110) or 2 (ADIN2111)                   */
+    adin2111_hal_t  hal;
+    bool            crc_enabled; /* SPI generic-protocol CRC-8 per transaction */
+    adin2111_mode_t mode;        /* endpoint vs daisy-chain switch             */
+    uint32_t        phy_id;      /* value read from PHYID register             */
+    uint8_t         num_ports;   /* 1 (ADIN1110) or 2 (ADIN2111)               */
 } adin2111_t;
 
 /**
- * Reset the device, verify its identity and apply the default bridge
- * configuration: HW FCS append/check, forward unknown frames to host, both
- * ports enabled, RX_RDY / SPI_ERR interrupts unmasked.
+ * Reset the device, verify its identity and apply the configuration for @p mode:
+ *  - common: HW FCS append/check, group (bcast+mcast) catch-all filter,
+ *    RX_RDY / SPI_ERR interrupts unmasked.
+ *  - ENDPOINT: unknown unicast forwarded to host (promiscuous NIC).
+ *  - SWITCH:   cut-through enabled, group frames also flooded to the other
+ *    port; unknown unicast is NOT sent to host (it is switched via the FDB).
  *
  * @param crc_enabled  Must match how the part is strapped for SPI CRC.
  */
 adin2111_status_t adin2111_init(adin2111_t *dev,
                                 const adin2111_hal_t *hal,
-                                bool crc_enabled);
+                                bool crc_enabled,
+                                adin2111_mode_t mode);
+
+/**
+ * Program (or refresh) a learned unicast forwarding entry: a frame whose
+ * destination is @p mac, arriving on the port opposite @p live_port, is
+ * forwarded in hardware to @p live_port (no host copy). Used by the host's
+ * learning logic in switch mode.
+ *
+ * @param slot  filter slot to use (ADIN_MAC_SLOT_FDB_BASE .. 15).
+ */
+adin2111_status_t adin2111_fdb_set(adin2111_t *dev, uint8_t slot,
+                                   const uint8_t mac[6],
+                                   adin2111_port_t live_port);
+
+/** Clear a previously programmed filter/FDB slot. */
+adin2111_status_t adin2111_fdb_clear(adin2111_t *dev, uint8_t slot);
 
 /** Raw 32-bit register access (big-endian on the wire, host order here). */
 adin2111_status_t adin2111_read_reg(adin2111_t *dev, uint16_t reg, uint32_t *val);

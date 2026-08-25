@@ -29,11 +29,47 @@ A third `link_task` polls the PHY link state and reports it to the host over
 the ECM **interrupt IN** endpoint (`NETWORK_CONNECTION` /
 `CONNECTION_SPEED_CHANGE`), so the host's carrier tracks the SPE link.
 
-The ADIN2111 is configured to append/verify the Ethernet FCS in hardware and to
-forward unknown‑destination and broadcast frames to the SPI host, so the bridge
-behaves like a promiscuous NIC. The device's unicast MAC (advertised to the USB
-host **and** programmed into the ADIN address filter) is derived from the STM32
-96‑bit unique ID, so multiple boards don't collide.
+The ADIN2111 appends/verifies the Ethernet FCS in hardware. The device's unicast
+MAC (advertised to the USB host **and** programmed into the ADIN address filter)
+is derived from the STM32 96‑bit unique ID, so multiple boards don't collide. How
+frames are forwarded depends on `ADIN_DAISY_CHAIN_MODE` — see below.
+
+## Forwarding modes (`ADIN_DAISY_CHAIN_MODE`)
+
+The ADIN2111 is a **filter‑table switch, not an auto‑learning flood switch**: a
+frame is forwarded from one T1L port to the other only if its destination
+matches a filter‑table entry with the *forward‑to‑other‑port* bit set. There is
+no hardware flooding of unknown unicast between ports. Two modes are built on
+that:
+
+**Endpoint** (`ADIN_DAISY_CHAIN_MODE = 0`) — promiscuous NIC. `FWD_UNK2HOST` is
+set so all traffic reaches the host; nothing is switched port‑to‑port. Use this
+for a leaf node / single‑port ADIN1110.
+
+**Daisy‑chain switch** (`= 1`, default) — for line topologies where this node
+sits mid‑chain (Port 1 ↔ upstream, Port 2 ↔ downstream) and must pass through
+traffic for other nodes without burdening the host/USB:
+
+- **Cut‑through** (`PORT_CUT_THRU_EN`) is enabled — minimal per‑hop latency.
+- **Broadcast + multicast** (one group catch‑all filter, `01:…` mask) are
+  flooded to the other T1L port *and* copied to the host, so they propagate
+  down the chain and the host still sees them.
+- **Frames for us** (own‑MAC filter) go to the host only.
+- **Unicast for other nodes** is switched port‑to‑port in hardware via a
+  **host‑learned forwarding table**: `net_rx_task` learns the source MAC +
+  ingress port of every frame the host sees (broadcasts, multicasts, frames for
+  us) and programs an ADIN filter slot so later unicast to that node is
+  forwarded without host involvement. Entries age out (`NET_FDB_AGE_MS`) and are
+  bounded by the **14 free filter slots** (`NET_FDB_MAX_ENTRIES`). Host‑injected
+  frames egress the learned port, or flood both ports when the destination is
+  broadcast/multicast or not yet learned.
+
+Because learning is seeded from broadcast/multicast (e.g. ARP/ND), unicast that
+is *never* preceded by any broadcast from its target — and networks with more
+than 14 active peers per node — will not be fully hardware‑switched; the classic
+options are static entries, or a software‑forwarding fallback. Ring topologies
+need a loop‑prevention protocol (out of scope). This node still enumerates and
+works as a normal USB Ethernet endpoint in either mode.
 
 ## Repository layout
 
@@ -130,6 +166,9 @@ Everything worth changing lives in `Core/Inc/app_config.h`:
 - **Buffering** — `NET_RX_POOL_COUNT` / `NET_TX_POOL_COUNT` trade RAM for burst
   tolerance (each buffer is `NET_MAX_FRAME_LEN` ≈ 1.5 KiB).
 - **MAC address** — override `BOARD_MAC_*`, or change `bsp_get_mac_address()`.
+- **Forwarding** — `ADIN_DAISY_CHAIN_MODE` (endpoint vs daisy‑chain switch),
+  `NET_FDB_MAX_ENTRIES` (learned entries, ≤ 14), `NET_FDB_AGE_MS` (entry idle
+  timeout).
 - **Task priorities / stacks** — the `TASK_*` macros.
 
 ## Design notes & limitations

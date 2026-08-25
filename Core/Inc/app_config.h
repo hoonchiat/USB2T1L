@@ -102,6 +102,25 @@
 #define ADIN_SPI_USE_CRC             1
 
 /* ------------------------------------------------------------------------- */
+/* Forwarding / daisy-chain mode                                             */
+/* ------------------------------------------------------------------------- */
+/* 0 = endpoint: promiscuous NIC, all traffic goes to the USB host, nothing is
+ *     switched between the two T1L ports.
+ * 1 = daisy-chain switch: broadcast/multicast are flooded P1<->P2 and copied
+ *     to the host; frames addressed to us go to the host; unicast for OTHER
+ *     nodes is forwarded port-to-port in hardware (cut-through) using a MAC
+ *     table the host learns. This node still works as a USB endpoint too. */
+#define ADIN_DAISY_CHAIN_MODE        1
+
+/* Switch-mode learning: how many learned unicast entries the host manages in
+ * the ADIN filter table. The hardware has 16 slots total; slots 0 and 1 are
+ * the group and host filters, so the FDB can use at most 14 (slots 2..15).
+ * Entries idle longer than NET_FDB_AGE_MS become evictable when the table is
+ * full. */
+#define NET_FDB_MAX_ENTRIES          14U
+#define NET_FDB_AGE_MS               300000U   /* 5 minutes */
+
+/* ------------------------------------------------------------------------- */
 /* Status LEDs (optional). Set ADIN/USB LED ports to NULL to disable.        */
 /* Defaults target the STM32F4-Discovery user LEDs on GPIOD.                 */
 /* ------------------------------------------------------------------------- */

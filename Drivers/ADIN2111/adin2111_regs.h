@@ -38,10 +38,13 @@
 #define ADIN_REG_FIFO_CLR            0x36U
 #define ADIN_REG_SOFT_RST            0x3CU   /* key-based soft reset         */
 #define ADIN_REG_MAC_RST_STATUS      0x3BU
+/* 16 address filter slots; each slot has its own value and mask register pair.
+ * value: 0x50/0x51 + 2*slot   mask: 0x70/0x71 + 2*slot */
 #define ADIN_REG_MAC_ADDR_FILT_UPR(x) (0x50U + 2U * (x))
 #define ADIN_REG_MAC_ADDR_FILT_LWR(x) (0x51U + 2U * (x))
-#define ADIN_REG_MAC_ADDR_MASK_UPR   0x70U
-#define ADIN_REG_MAC_ADDR_MASK_LWR   0x71U
+#define ADIN_REG_MAC_ADDR_MASK_UPR(x) (0x70U + 2U * (x))
+#define ADIN_REG_MAC_ADDR_MASK_LWR(x) (0x71U + 2U * (x))
+#define ADIN_MAC_FILTER_SLOTS         16U
 #define ADIN_REG_RX_FSIZE            0x90U   /* port 1 RX frame size (bytes) */
 #define ADIN_REG_RX                  0x91U   /* port 1 RX FIFO data port     */
 #define ADIN2111_REG_RX_P2_FSIZE     0xC0U   /* port 2 RX frame size         */
@@ -95,10 +98,13 @@
 #define ADIN_MAC_ADDR_TO_HOST        (1U << 16)
 #define ADIN2111_MAC_ADDR_TO_OTHER_PORT (1U << 17)
 
-/* MAC address slot assignments used by adin2111.c */
-#define ADIN_MAC_SLOT_BROADCAST      0U
-#define ADIN_MAC_SLOT_HOST           1U   /* our own unicast (host) address  */
-#define ADIN_MAC_SLOT_MULTICAST      2U
+/* MAC address slot assignments used by adin2111.c:
+ *   slot 0  : group catch-all (broadcast + all multicast)
+ *   slot 1  : our own unicast (host) address
+ *   slot 2+ : learned unicast FDB entries (switch/daisy-chain mode) */
+#define ADIN_MAC_SLOT_GROUP          0U
+#define ADIN_MAC_SLOT_HOST           1U
+#define ADIN_MAC_SLOT_FDB_BASE       2U   /* first learned-forwarding slot   */
 
 /* --- Device identification ---------------------------------------------- */
 #define ADIN1110_PHYID_VAL           0x0283BC91U

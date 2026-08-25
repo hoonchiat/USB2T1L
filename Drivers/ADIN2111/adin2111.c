@@ -328,53 +328,102 @@ adin2111_status_t adin2111_write_frame(adin2111_t *dev, adin2111_port_t port,
     return adin_fifo_write(dev, ADIN_REG_TX, body, body_len);
 }
 
+/* Write one address filter slot: value = ctl (bits 16-31) | address, plus its
+ * own mask. The APPLY2PORTx bits in ctl activate the entry, so FILT_UPR is
+ * written last (after LWR and both mask words) to avoid a transient match
+ * against stale address/mask. Set ctl = 0 (no APPLY2PORT) to disable a slot. */
+static adin2111_status_t adin_write_filter(adin2111_t *dev, uint8_t slot,
+                                           uint32_t ctl,
+                                           uint16_t addr_upr, uint32_t addr_lwr,
+                                           uint16_t mask_upr, uint32_t mask_lwr)
+{
+    adin2111_status_t rc;
+    rc = adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_MASK_UPR(slot), mask_upr);
+    if (rc != ADIN2111_OK) {
+        return rc;
+    }
+    rc = adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_MASK_LWR(slot), mask_lwr);
+    if (rc != ADIN2111_OK) {
+        return rc;
+    }
+    rc = adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_FILT_LWR(slot), addr_lwr);
+    if (rc != ADIN2111_OK) {
+        return rc;
+    }
+    return adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_FILT_UPR(slot),
+                              ctl | addr_upr);
+}
+
+/* Both-ingress-ports control mask (APPLY2PORT2 only exists on the ADIN2111). */
+static uint32_t adin_apply_all_ports(const adin2111_t *dev)
+{
+    uint32_t bits = ADIN_MAC_ADDR_APPLY2PORT1;
+    if (dev->num_ports > 1) {
+        bits |= ADIN2111_MAC_ADDR_APPLY2PORT2;
+    }
+    return bits;
+}
+
 adin2111_status_t adin2111_set_host_mac(adin2111_t *dev, const uint8_t mac[6])
 {
     if (mac == NULL) {
         return ADIN2111_ERR_PARAM;
     }
-    uint32_t upr = ((uint32_t)mac[0] << 8) | mac[1];
-    uint32_t lwr = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
-                   ((uint32_t)mac[4] << 8) | mac[5];
+    uint16_t addr_upr = (uint16_t)(((uint16_t)mac[0] << 8) | mac[1]);
+    uint32_t addr_lwr = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
+                        ((uint32_t)mac[4] << 8) | mac[5];
 
-    /* Forward frames matching our address to the host on both ports. */
-    uint32_t upr_ctl = upr | ADIN_MAC_ADDR_TO_HOST | ADIN_MAC_ADDR_APPLY2PORT1;
-    if (dev->num_ports > 1) {
-        upr_ctl |= ADIN2111_MAC_ADDR_APPLY2PORT2;
-    }
-
-    adin2111_status_t rc;
-    rc = adin2111_write_reg(dev,
-             ADIN_REG_MAC_ADDR_FILT_UPR(ADIN_MAC_SLOT_HOST), upr_ctl);
-    if (rc != ADIN2111_OK) {
-        return rc;
-    }
-    rc = adin2111_write_reg(dev,
-             ADIN_REG_MAC_ADDR_FILT_LWR(ADIN_MAC_SLOT_HOST), lwr);
-    if (rc != ADIN2111_OK) {
-        return rc;
-    }
-    /* Exact-match mask (all address bits significant). */
-    (void)adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_MASK_UPR, 0x0000FFFFu);
-    (void)adin2111_write_reg(dev, ADIN_REG_MAC_ADDR_MASK_LWR, 0xFFFFFFFFu);
-    return ADIN2111_OK;
+    /* Frames destined to us go to the host only (never relayed on). Exact
+     * match on all 48 address bits. */
+    uint32_t ctl = ADIN_MAC_ADDR_TO_HOST | adin_apply_all_ports(dev);
+    return adin_write_filter(dev, ADIN_MAC_SLOT_HOST, ctl,
+                             addr_upr, addr_lwr, 0xFFFFu, 0xFFFFFFFFu);
 }
 
-/* Program the broadcast forwarding entry (dst = ff:ff:ff:ff:ff:ff -> host). */
-static adin2111_status_t adin_set_broadcast_filter(adin2111_t *dev)
+/* Group catch-all: matches any DA with the multicast/broadcast group bit set
+ * (mask compares only bit 0 of the first octet). Always copied to the host;
+ * also flooded to the other T1L port when @p flood_other (switch mode). */
+static adin2111_status_t adin_set_group_filter(adin2111_t *dev, bool flood_other)
 {
-    uint32_t upr = 0x0000FFFFu | ADIN_MAC_ADDR_TO_HOST | ADIN_MAC_ADDR_APPLY2PORT1;
-    if (dev->num_ports > 1) {
-        upr |= ADIN2111_MAC_ADDR_APPLY2PORT2;
+    uint32_t ctl = ADIN_MAC_ADDR_TO_HOST | adin_apply_all_ports(dev);
+    if (flood_other && dev->num_ports > 1) {
+        ctl |= ADIN2111_MAC_ADDR_TO_OTHER_PORT;
     }
-    adin2111_status_t rc;
-    rc = adin2111_write_reg(dev,
-             ADIN_REG_MAC_ADDR_FILT_UPR(ADIN_MAC_SLOT_BROADCAST), upr);
-    if (rc != ADIN2111_OK) {
-        return rc;
+    /* addr/mask = 01:00:00:00:00:00 -> compare only the group bit. */
+    return adin_write_filter(dev, ADIN_MAC_SLOT_GROUP, ctl,
+                             0x0100u, 0x00000000u, 0x0100u, 0x00000000u);
+}
+
+adin2111_status_t adin2111_fdb_set(adin2111_t *dev, uint8_t slot,
+                                   const uint8_t mac[6],
+                                   adin2111_port_t live_port)
+{
+    if (dev == NULL || mac == NULL || dev->num_ports < 2 ||
+        slot < ADIN_MAC_SLOT_FDB_BASE || slot >= ADIN_MAC_FILTER_SLOTS) {
+        return ADIN2111_ERR_PARAM;
     }
-    return adin2111_write_reg(dev,
-             ADIN_REG_MAC_ADDR_FILT_LWR(ADIN_MAC_SLOT_BROADCAST), 0xFFFFFFFFu);
+    uint16_t addr_upr = (uint16_t)(((uint16_t)mac[0] << 8) | mac[1]);
+    uint32_t addr_lwr = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
+                        ((uint32_t)mac[4] << 8) | mac[5];
+
+    /* mac lives on live_port, so a frame to mac arriving on the OPPOSITE port
+     * is forwarded (TO_OTHER_PORT) to live_port. The rule's ingress port is
+     * therefore the opposite of live_port; no host copy. */
+    uint32_t ingress = (live_port == ADIN2111_PORT_1)
+                           ? ADIN2111_MAC_ADDR_APPLY2PORT2
+                           : ADIN_MAC_ADDR_APPLY2PORT1;
+    uint32_t ctl = ADIN2111_MAC_ADDR_TO_OTHER_PORT | ingress;
+    return adin_write_filter(dev, slot, ctl, addr_upr, addr_lwr,
+                             0xFFFFu, 0xFFFFFFFFu);
+}
+
+adin2111_status_t adin2111_fdb_clear(adin2111_t *dev, uint8_t slot)
+{
+    if (dev == NULL || slot >= ADIN_MAC_FILTER_SLOTS) {
+        return ADIN2111_ERR_PARAM;
+    }
+    /* ctl = 0 clears APPLY2PORTx, deactivating the slot. */
+    return adin_write_filter(dev, slot, 0u, 0u, 0u, 0u, 0u);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -383,7 +432,8 @@ static adin2111_status_t adin_set_broadcast_filter(adin2111_t *dev)
 
 adin2111_status_t adin2111_init(adin2111_t *dev,
                                 const adin2111_hal_t *hal,
-                                bool crc_enabled)
+                                bool crc_enabled,
+                                adin2111_mode_t mode)
 {
     if (dev == NULL || hal == NULL || hal->spi_xfer == NULL) {
         return ADIN2111_ERR_PARAM;
@@ -391,6 +441,7 @@ adin2111_status_t adin2111_init(adin2111_t *dev,
     memset(dev, 0, sizeof(*dev));
     dev->hal = *hal;
     dev->crc_enabled = crc_enabled;
+    dev->mode = mode;
     dev->num_ports = 2;   /* assume ADIN2111; corrected after id read below  */
 
     /* Hardware reset pulse (RST is active low). */
@@ -427,24 +478,38 @@ adin2111_status_t adin2111_init(adin2111_t *dev,
         return ADIN2111_ERR_ID;
     }
 
+    /* A single-port ADIN1110 cannot switch; force endpoint behaviour. */
+    if (dev->num_ports < 2) {
+        dev->mode = ADIN2111_MODE_ENDPOINT;
+    }
+
     /* Clear both FIFOs. */
     (void)adin2111_write_reg(dev, ADIN_REG_FIFO_CLR,
                              ADIN_FIFO_CLR_RX | ADIN_FIFO_CLR_TX);
 
-    /* CONFIG2: append/check FCS in hardware, forward unknown-DA frames to the
-     * host on both ports so the bridge behaves like a promiscuous NIC. */
-    uint32_t cfg2 = ADIN_CONFIG2_CRC_APPEND | ADIN_CONFIG2_FWD_UNK2HOST;
-    if (dev->num_ports > 1) {
-        cfg2 |= ADIN2111_CONFIG2_P2_FWD_UNK2HOST;
+    /* CONFIG2: always HW FCS. Then per mode:
+     *  - ENDPOINT: forward unknown-DA frames to the host (promiscuous NIC).
+     *  - SWITCH:   cut-through between the two ports; unknown unicast is NOT
+     *    copied to the host (it is switched via the FDB), keeping the host/USB
+     *    free of other nodes' traffic. */
+    uint32_t cfg2 = ADIN_CONFIG2_CRC_APPEND;
+    if (dev->mode == ADIN2111_MODE_ENDPOINT) {
+        cfg2 |= ADIN_CONFIG2_FWD_UNK2HOST;
+        if (dev->num_ports > 1) {
+            cfg2 |= ADIN2111_CONFIG2_P2_FWD_UNK2HOST;
+        }
+    } else {
+        cfg2 |= ADIN2111_CONFIG2_PORT_CUT_THRU;
     }
     rc = adin2111_write_reg(dev, ADIN_REG_CONFIG2, cfg2);
     if (rc != ADIN2111_OK) {
         return rc;
     }
 
-    /* Broadcast forwarding filter. Unicast (host) filter is set later via
-     * adin2111_set_host_mac() once the MAC address is known. */
-    (void)adin_set_broadcast_filter(dev);
+    /* Group (broadcast + multicast) catch-all: to host always; also flooded
+     * to the other port in switch mode so it propagates down the chain. The
+     * unicast (host) filter is set later via adin2111_set_host_mac(). */
+    (void)adin_set_group_filter(dev, dev->mode == ADIN2111_MODE_SWITCH);
 
     /* Unmask RX_RDY (both ports) and SPI error interrupts; mask stays 1=off
      * for everything else. */
