@@ -1,14 +1,20 @@
 name: release
 
-# Build the firmware and publish a GitHub Release with the binaries whenever a
-# version tag (vX.Y[.Z]) is pushed. build.yml handles branch/PR builds; this
-# only runs for tags, so there is no duplicate run.
+# Build the firmware and publish a GitHub Release with the binaries.
+# Trigger either by pushing a version tag (vX.Y[.Z]) or by manually running this
+# workflow and entering the tag (handy when tag pushes are restricted). build.yml
+# handles branch/PR builds, so there is no duplicate run here.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create/publish (e.g. v0.1)'
+        required: true
 
 permissions:
-  contents: write   # needed to create the release and upload assets
+  contents: write   # needed to create the tag, release and upload assets
 
 jobs:
   release:
@@ -68,6 +74,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "${GITHUB_REF_NAME}" \
+          # tag from the manual input, or the pushed tag ref
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          echo "Publishing release $TAG at $GITHUB_SHA"
+          # --target creates the tag at this commit when it does not exist yet;
+          # it is ignored when the tag already exists (tag-push trigger).
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
             --notes-file notes.md
