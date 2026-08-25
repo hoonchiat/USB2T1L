@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch STM32CubeF4 (CMSIS + HAL + USB Device Library + FreeRTOS) into
-# third_party/. A shallow clone is enough for building.
+# third_party/. The HAL driver and CMSIS device are git submodules of the Cube
+# repo, so the clone must recurse submodules or those dirs come up empty.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,6 +16,7 @@ if [ -d "$DEST/Drivers/STM32F4xx_HAL_Driver/Src" ]; then
 fi
 
 mkdir -p "$(dirname "$DEST")"
-echo "Cloning STM32CubeF4 $TAG -> $DEST"
-git clone --depth 1 --branch "$TAG" "$REPO" "$DEST"
+echo "Cloning STM32CubeF4 $TAG (with submodules) -> $DEST"
+git clone --depth 1 --branch "$TAG" \
+    --recurse-submodules --shallow-submodules "$REPO" "$DEST"
 echo "Done. Build with: make"
