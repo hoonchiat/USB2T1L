@@ -7,6 +7,11 @@
 
 SPI_HandleTypeDef hspi_adin;
 
+#if (ADIN_SPI_USE_DMA)
+DMA_HandleTypeDef hdma_adin_spi_tx;
+DMA_HandleTypeDef hdma_adin_spi_rx;
+#endif
+
 /* ------------------------------------------------------------------------- */
 /* Clock tree: HSE -> PLL -> 168 MHz SYSCLK, 48 MHz for USB OTG FS           */
 /* ------------------------------------------------------------------------- */
@@ -128,6 +133,55 @@ static void spi_config(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* SPI DMA: TX/RX streams on DMA2, linked to the SPI handle                   */
+/* ------------------------------------------------------------------------- */
+#if (ADIN_SPI_USE_DMA)
+static void spi_dma_config(void)
+{
+    ADIN_SPI_DMA_CLK_ENABLE();
+
+    /* Memory <-> SPI data register, byte wide, normal (single-shot) mode. */
+    hdma_adin_spi_tx.Instance                 = ADIN_SPI_DMA_TX_INSTANCE;
+    hdma_adin_spi_tx.Init.Channel             = ADIN_SPI_DMA_TX_CHANNEL;
+    hdma_adin_spi_tx.Init.Direction           = DMA_MEMORY_TO_PERIPH;
+    hdma_adin_spi_tx.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_adin_spi_tx.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_adin_spi_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_adin_spi_tx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+    hdma_adin_spi_tx.Init.Mode                = DMA_NORMAL;
+    hdma_adin_spi_tx.Init.Priority            = DMA_PRIORITY_HIGH;
+    hdma_adin_spi_tx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_adin_spi_tx) != HAL_OK) {
+        bsp_fatal("DMA_TX_Init");
+    }
+    __HAL_LINKDMA(&hspi_adin, hdmatx, hdma_adin_spi_tx);
+
+    hdma_adin_spi_rx.Instance                 = ADIN_SPI_DMA_RX_INSTANCE;
+    hdma_adin_spi_rx.Init.Channel             = ADIN_SPI_DMA_RX_CHANNEL;
+    hdma_adin_spi_rx.Init.Direction           = DMA_PERIPH_TO_MEMORY;
+    hdma_adin_spi_rx.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_adin_spi_rx.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_adin_spi_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_adin_spi_rx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+    hdma_adin_spi_rx.Init.Mode                = DMA_NORMAL;
+    hdma_adin_spi_rx.Init.Priority            = DMA_PRIORITY_HIGH;
+    hdma_adin_spi_rx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&hdma_adin_spi_rx) != HAL_OK) {
+        bsp_fatal("DMA_RX_Init");
+    }
+    __HAL_LINKDMA(&hspi_adin, hdmarx, hdma_adin_spi_rx);
+
+    /* Both callbacks run FreeRTOS ...FromISR; keep priority >= max-syscall. */
+    HAL_NVIC_SetPriority(ADIN_SPI_DMA_TX_IRQn, ADIN_SPI_DMA_IRQ_PRIO, 0);
+    HAL_NVIC_EnableIRQ(ADIN_SPI_DMA_TX_IRQn);
+    HAL_NVIC_SetPriority(ADIN_SPI_DMA_RX_IRQn, ADIN_SPI_DMA_IRQ_PRIO, 0);
+    HAL_NVIC_EnableIRQ(ADIN_SPI_DMA_RX_IRQn);
+    HAL_NVIC_SetPriority(ADIN_SPI_IRQn, ADIN_SPI_DMA_IRQ_PRIO, 0);
+    HAL_NVIC_EnableIRQ(ADIN_SPI_IRQn);
+}
+#endif /* ADIN_SPI_USE_DMA */
+
+/* ------------------------------------------------------------------------- */
 /* Public                                                                     */
 /* ------------------------------------------------------------------------- */
 
@@ -136,6 +190,9 @@ void bsp_init(void)
     system_clock_config();
     gpio_config();
     spi_config();
+#if (ADIN_SPI_USE_DMA)
+    spi_dma_config();
+#endif
 }
 
 void bsp_get_mac_address(uint8_t mac[6])

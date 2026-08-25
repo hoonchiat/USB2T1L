@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "stm32f4xx_hal.h"
+#include "app_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +16,12 @@ extern "C" {
 
 /** SPI peripheral handle used by the ADIN2111 driver port. */
 extern SPI_HandleTypeDef hspi_adin;
+
+#if (ADIN_SPI_USE_DMA)
+/** SPI TX/RX DMA handles (linked to hspi_adin); referenced by the DMA ISRs. */
+extern DMA_HandleTypeDef hdma_adin_spi_tx;
+extern DMA_HandleTypeDef hdma_adin_spi_rx;
+#endif
 
 /** Configure system clock (168 MHz, 48 MHz USB), GPIO, SPI and LEDs. Call
  *  once after HAL_Init(), before creating tasks. */

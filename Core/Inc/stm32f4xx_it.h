@@ -21,6 +21,11 @@ void DebugMon_Handler(void);
 void TIM6_DAC_IRQHandler(void);
 void OTG_FS_IRQHandler(void);
 void ADIN_INT_EXTI_IRQHandler(void);
+#if (ADIN_SPI_USE_DMA)
+void ADIN_SPI_DMA_TX_IRQHandler(void);
+void ADIN_SPI_DMA_RX_IRQHandler(void);
+void ADIN_SPI_IRQHandler(void);
+#endif
 
 #ifdef __cplusplus
 }
