@@ -1,0 +1,52 @@
+name: build
+
+# Compile-check the firmware with the ARM bare-metal toolchain on every push to
+# main and on every pull request.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+# One in-flight run per ref; newer pushes cancel older runs.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: firmware (arm-none-eabi-gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Official Arm GNU toolchain — includes newlib-nano (needed for the
+      # Makefile's -specs=nano.specs), unlike some distro packages.
+      - name: Install ARM GNU toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '13.2.Rel1'
+
+      - name: Toolchain version
+        run: arm-none-eabi-gcc --version
+
+      # Cache the STM32CubeF4 checkout (HAL/CMSIS/USB device lib/FreeRTOS).
+      # Keyed on get_deps.sh so a pinned-tag change invalidates the cache.
+      - name: Cache STM32CubeF4
+        uses: actions/cache@v4
+        with:
+          path: third_party/STM32CubeF4
+          key: cubef4-${{ hashFiles('scripts/get_deps.sh') }}
+
+      # Idempotent: skips cloning if the cache restored the tree.
+      - name: Fetch dependencies (STM32CubeF4)
+        run: make deps
+
+      - name: Build firmware
+        run: make
+
+      - name: Firmware size
+        run: arm-none-eabi-size build/*.elf
