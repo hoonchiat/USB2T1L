@@ -1,0 +1,73 @@
+name: release
+
+# Build the firmware and publish a GitHub Release with the binaries whenever a
+# version tag (vX.Y[.Z]) is pushed. build.yml handles branch/PR builds; this
+# only runs for tags, so there is no duplicate run.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # needed to create the release and upload assets
+
+jobs:
+  release:
+    name: build + publish firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM GNU toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '13.2.Rel1'
+
+      - name: Cache STM32CubeF4
+        uses: actions/cache@v4
+        with:
+          path: third_party/STM32CubeF4
+          key: cubef4-${{ hashFiles('scripts/get_deps.sh') }}
+
+      - name: Fetch dependencies (STM32CubeF4)
+        run: make deps
+
+      - name: Build firmware
+        run: make
+
+      - name: Package artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base=build/stm32f407-adin2111-ecm
+          cp "$base.elf" "$base.hex" "$base.bin" dist/
+          arm-none-eabi-size "$base.elf" | tee dist/size.txt
+          ( cd dist && sha256sum stm32f407-adin2111-ecm.* > SHA256SUMS )
+          ls -l dist
+
+      - name: Write release notes
+        run: |
+          cat > notes.md <<'EOF'
+          Firmware build for the **STM32F407 ⇄ ADIN2111 ⇄ USB CDC-ECM** Ethernet bridge (FreeRTOS).
+
+          **What's included**
+          - ADIN2111 10BASE-T1L (SPI) ⇄ USB CDC-ECM — enumerates as a native Ethernet interface on Linux (`cdc_ether`).
+          - SPI frame transfers via DMA (CPU freed during each ~0.6 ms burst).
+          - ADIN2111 daisy-chain switch mode: hardware port-to-port forwarding + host MAC learning.
+          - Built and verified in CI with arm-none-eabi-gcc 13.2.Rel1.
+
+          **Assets**
+          - `stm32f407-adin2111-ecm.bin` — flash to `0x08000000`.
+          - `stm32f407-adin2111-ecm.hex` / `.elf` — via ST-LINK / OpenOCD (`make flash`).
+          - `SHA256SUMS`, `size.txt`.
+
+          **Target** STM32F407VGT6 @ 168 MHz. Review `ADIN_SPI_USE_CRC` and the placeholder USB VID/PID in the README before hardware bring-up.
+          EOF
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md
