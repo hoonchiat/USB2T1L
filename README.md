@@ -166,28 +166,43 @@ feeds **both** the USB CDC‑ECM descriptor and the ADIN2111 filter — and fall
 back to the UID‑derived MAC when the record is absent/invalid, so unprovisioned
 boards still work. The USB `iSerialNumber` also comes from the record.
 
-**Inject at production test** (over SWD — `tools/prodinfo.py`, stdlib only for
-`build`/`decode`):
+**Write the MAC / serial / batch at production test** (over SWD —
+`tools/prodinfo.py`, stdlib only; needs `st-flash` or `openocd`):
 
 ```sh
-# 1. flash the firmware (sector-erase, NOT a full-chip mass-erase)
-# 2. build + write the per-unit record to 0x080E0000
-python3 tools/prodinfo.py build --mac 02:11:22:33:44:55 --serial SN0001 \
-        --batch B2026-08 --fwver v0.1 --hwrev A1 --date 2026-08-25 --out unit0001.bin
-python3 tools/prodinfo.py flash unit0001.bin      # st-flash / OpenOCD to 0x080E0000
+# 1. flash the firmware first (sector-erase, NOT a full-chip mass-erase)
+# 2. inject the per-unit record to 0x080E0000 in one step (build + flash + verify)
+python3 tools/prodinfo.py write --mac 02:11:22:33:44:55 --serial SN0001 \
+        --batch B2026-08 --fwver v0.1 --hwrev A1 --date 2026-08-25
+
+# update just one field, keeping whatever is already on the device (read-modify-write)
+python3 tools/prodinfo.py write --keep --serial SN0002
+
+# OpenOCD instead of st-flash:
+python3 tools/prodinfo.py write --programmer openocd --mac 02:11:22:33:44:55 --serial SN0001
 ```
+
+`write` builds the 128‑byte record in memory, flashes it, then reads it back
+and verifies (`--no-verify` to skip, `--dry-run` to preview without flashing).
+The lower‑level `build` (make a `.bin`) and `flash` (write a `.bin`) commands
+are still available for an offline file workflow.
 
 > Order matters: program the firmware first (or use sector erase), then write
 > the record — a chip **mass‑erase** would wipe sector 11.
 
-**Read it back from Linux:**
+**Read the MAC / serial / batch back:**
 
-- **MAC** → the interface MAC: `ip link show usb0`.
-- **Serial** → `cat /sys/bus/usb/devices/*/serial` or `lsusb -v`.
-- **Full record** (all fields) → a vendor USB control request:
+- **Over SWD** (no firmware needed — reads sector 11 directly):
   ```sh
-  python3 tools/prodinfo.py read       # pyusb: ctrl_transfer(0xC0, 0x50, …)
+  python3 tools/prodinfo.py dump         # st-flash / OpenOCD read of 0x080E0000
   ```
+- **Over USB, from Linux, with the firmware running:**
+  - **MAC** → the interface MAC: `ip link show usb0`.
+  - **Serial** → `cat /sys/bus/usb/devices/*/serial` or `lsusb -v`.
+  - **Full record** (all fields) → a vendor USB control request:
+    ```sh
+    python3 tools/prodinfo.py read       # pyusb: ctrl_transfer(0xC0, 0x50, …)
+    ```
 
 The firmware's CRC (`prodinfo_crc32`) is byte‑identical to Python's
 `zlib.crc32`, so a record the tool builds always validates on‑device.
