@@ -13,12 +13,17 @@
 #include "usbd_ctlreq.h"
 
 #include "net_bridge.h"
+#include "prodinfo.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
 
 #include <string.h>
+
+/* Vendor control request: IN | Vendor | Device, bRequest = 0x50 returns the
+ * 128-byte production record (see tools/prodinfo.py `read`). */
+#define VENDOR_REQ_GET_PRODINFO              0x50U
 
 /* ECM class-specific request codes (bRequest). */
 #define ECM_SET_ETHERNET_MULTICAST_FILTERS   0x40U
@@ -248,9 +253,29 @@ static void ECM_HandleClassReq(USBD_HandleTypeDef *pdev,
     }
 }
 
+/* RAM copy of the production record for the EP0 IN control transfer (the core
+ * streams from this buffer in the ISR, so it must stay valid — a static is fine). */
+static uint8_t s_prodinfo_buf[PRODINFO_SIZE];
+
 static uint8_t ECM_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req)
 {
     switch (req->bmRequest & USB_REQ_TYPE_MASK) {
+    case USB_REQ_TYPE_VENDOR:
+        if ((req->bmRequest & 0x80U) != 0U &&
+            req->bRequest == VENDOR_REQ_GET_PRODINFO) {
+            uint16_t len = req->wLength;
+            if (len > sizeof(s_prodinfo_buf)) {
+                len = sizeof(s_prodinfo_buf);
+            }
+            memcpy(s_prodinfo_buf, (const void *)PRODINFO_FLASH_ADDR,
+                   sizeof(s_prodinfo_buf));
+            (void)USBD_CtlSendData(pdev, s_prodinfo_buf, len);
+        } else {
+            USBD_CtlError(pdev, req);
+            return (uint8_t)USBD_FAIL;
+        }
+        break;
+
     case USB_REQ_TYPE_CLASS:
         ECM_HandleClassReq(pdev, req);
         break;
