@@ -47,8 +47,10 @@ jobs:
           mkdir -p dist
           base=build/stm32f407-adin2111-ecm
           cp "$base.elf" "$base.hex" "$base.bin" dist/
+          # Ship the production-provisioning tool + record layout alongside the firmware.
+          cp tools/prodinfo.py Core/Inc/prodinfo.h dist/
           arm-none-eabi-size "$base.elf" | tee dist/size.txt
-          ( cd dist && sha256sum stm32f407-adin2111-ecm.* > SHA256SUMS )
+          ( cd dist && sha256sum stm32f407-adin2111-ecm.* prodinfo.py prodinfo.h > SHA256SUMS )
           ls -l dist
 
       - name: Write release notes
@@ -62,12 +64,25 @@ jobs:
           - ADIN2111 daisy-chain switch mode: hardware port-to-port forwarding + host MAC learning.
           - Built and verified in CI with arm-none-eabi-gcc 13.2.Rel1.
 
+          **New in v0.2 — production provisioning**
+          - Per-unit **production record** (MAC, serial, batch, firmware version, hardware rev, date) in a 128-byte, CRC-32-protected block in a reserved flash sector (sector 11 @ `0x080E0000`); a firmware update never touches it.
+          - The USB CDC-ECM MAC and the ADIN2111 filter both use the **MAC from flash**, with a UID-derived fallback when the record is absent/invalid. USB `iSerialNumber` comes from the record's serial.
+          - Full record is readable from Linux over a vendor USB control request (`0xC0`, `bRequest 0x50`).
+          - **Provisioning tool** `prodinfo.py` (bundled below): `write` injects MAC/serial/batch over SWD in one step (build + flash + verify; `--keep` for read-modify-write), `dump` reads the record back over SWD, `read` reads it over USB. Works with `st-flash` or OpenOCD.
+
           **Assets**
           - `stm32f407-adin2111-ecm.bin` — flash to `0x08000000`.
           - `stm32f407-adin2111-ecm.hex` / `.elf` — via ST-LINK / OpenOCD (`make flash`).
+          - `prodinfo.py` — production provisioning / read-back tool. `prodinfo.h` — the on-device record layout.
           - `SHA256SUMS`, `size.txt`.
 
-          **Target** STM32F407VGT6 @ 168 MHz. Review `ADIN_SPI_USE_CRC` and the placeholder USB VID/PID in the README before hardware bring-up.
+          **Provisioning quick start**
+          ```sh
+          python3 prodinfo.py write --mac 02:11:22:33:44:55 --serial SN0001 --batch B2026-08
+          python3 prodinfo.py dump          # read the record back over SWD
+          ```
+
+          **Target** STM32F407VGT6 @ 168 MHz. Review `ADIN_SPI_USE_CRC` and the placeholder USB VID/PID in the README before hardware bring-up. Program firmware first, then write the record — a full-chip mass-erase would wipe sector 11.
           EOF
 
       - name: Create GitHub release
