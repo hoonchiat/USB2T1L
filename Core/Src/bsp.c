@@ -4,6 +4,9 @@
  */
 #include "bsp.h"
 #include "app_config.h"
+#include "prodinfo.h"
+
+#include <string.h>
 
 SPI_HandleTypeDef hspi_adin;
 
@@ -197,7 +200,23 @@ void bsp_init(void)
 
 void bsp_get_mac_address(uint8_t mac[6])
 {
-    /* Locally administered, unicast: first octet bit1=1, bit0=0. */
+    /* Prefer the provisioned MAC from the production record in flash. Accept
+     * it only if it is a real unicast address (not erased 0xFF, not zero, and
+     * the multicast bit clear). */
+    const prodinfo_t *pi = prodinfo_get();
+    if (pi != NULL) {
+        static const uint8_t blank[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        static const uint8_t zero[6]  = {0};
+        if ((pi->mac[0] & 0x01u) == 0u &&
+            memcmp(pi->mac, blank, 6) != 0 &&
+            memcmp(pi->mac, zero, 6) != 0) {
+            memcpy(mac, pi->mac, 6);
+            return;
+        }
+    }
+
+    /* Fallback for unprovisioned boards: locally-administered MAC derived from
+     * the STM32 96-bit unique ID (first octet bit1=1 = LAA, bit0=0 = unicast). */
     uint32_t uid0 = *(uint32_t *)0x1FFF7A10U;
     uint32_t uid1 = *(uint32_t *)0x1FFF7A14U;
 

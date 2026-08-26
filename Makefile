@@ -44,6 +44,7 @@ C_SOURCES = \
   Core/Src/stm32f4xx_hal_msp.c \
   Core/Src/stm32f4xx_hal_timebase_tim.c \
   Core/Src/syscalls.c \
+  Core/Src/prodinfo.c \
   Drivers/ADIN2111/adin2111.c \
   Drivers/ADIN2111/adin2111_port_stm32.c \
   Net/frame_pool.c \

@@ -9,6 +9,9 @@
  */
 #include "usbd_desc.h"
 #include "usbd_ctlreq.h"
+#include "prodinfo.h"
+
+#include <string.h>
 
 #define USBD_MAX_STR_DESC_SIZ        64U
 #define DEVICE_ID_REG_BASE           0x1FFF7A10U   /* STM32F4 96-bit UID      */
@@ -100,6 +103,17 @@ static uint8_t *ECM_ProductStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *leng
 static uint8_t *ECM_SerialStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
 {
     (void)speed;
+    /* Use the provisioned serial number when the production record is valid;
+     * this appears as the USB iSerialNumber (lsusb / /sys/.../serial). */
+    const prodinfo_t *pi = prodinfo_get();
+    if (pi != NULL && pi->serial[0] != '\0' && (uint8_t)pi->serial[0] != 0xFFu) {
+        char tmp[sizeof(pi->serial) + 1];
+        memcpy(tmp, pi->serial, sizeof(pi->serial));
+        tmp[sizeof(pi->serial)] = '\0';   /* ensure NUL if the field is full */
+        USBD_GetString((uint8_t *)tmp, USBD_StrDesc, length);
+        return USBD_StrDesc;
+    }
+    /* Fallback: serial derived from the STM32 unique ID. */
     *length = USBD_StringSerial[0];
     get_serial_num();
     return USBD_StringSerial;

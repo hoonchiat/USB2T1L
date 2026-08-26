@@ -156,6 +156,42 @@ ping 192.0.2.1                              # a peer on the 10BASE-T1L segment
 The interface name may be `usb0` or a predictable `enxNN…` name derived from
 the advertised MAC, depending on your distro's `systemd-udev` naming rules.
 
+## Production provisioning
+
+Per‑unit data (MAC, serial, batch, firmware version, hardware rev, date) lives
+in a **128‑byte record in the last flash sector** (sector 11 @ `0x080E0000`,
+reserved by the linker, so a firmware update never touches it). The record is
+CRC‑32 protected. `bsp_get_mac_address()` returns the provisioned MAC — which
+feeds **both** the USB CDC‑ECM descriptor and the ADIN2111 filter — and falls
+back to the UID‑derived MAC when the record is absent/invalid, so unprovisioned
+boards still work. The USB `iSerialNumber` also comes from the record.
+
+**Inject at production test** (over SWD — `tools/prodinfo.py`, stdlib only for
+`build`/`decode`):
+
+```sh
+# 1. flash the firmware (sector-erase, NOT a full-chip mass-erase)
+# 2. build + write the per-unit record to 0x080E0000
+python3 tools/prodinfo.py build --mac 02:11:22:33:44:55 --serial SN0001 \
+        --batch B2026-08 --fwver v0.1 --hwrev A1 --date 2026-08-25 --out unit0001.bin
+python3 tools/prodinfo.py flash unit0001.bin      # st-flash / OpenOCD to 0x080E0000
+```
+
+> Order matters: program the firmware first (or use sector erase), then write
+> the record — a chip **mass‑erase** would wipe sector 11.
+
+**Read it back from Linux:**
+
+- **MAC** → the interface MAC: `ip link show usb0`.
+- **Serial** → `cat /sys/bus/usb/devices/*/serial` or `lsusb -v`.
+- **Full record** (all fields) → a vendor USB control request:
+  ```sh
+  python3 tools/prodinfo.py read       # pyusb: ctrl_transfer(0xC0, 0x50, …)
+  ```
+
+The firmware's CRC (`prodinfo_crc32`) is byte‑identical to Python's
+`zlib.crc32`, so a record the tool builds always validates on‑device.
+
 ## Tuning
 
 Everything worth changing lives in `Core/Inc/app_config.h`:
@@ -165,7 +201,8 @@ Everything worth changing lives in `Core/Inc/app_config.h`:
 - **Pins / SPI instance** — remap any signal, change `ADIN_SPI_PRESCALER`.
 - **Buffering** — `NET_RX_POOL_COUNT` / `NET_TX_POOL_COUNT` trade RAM for burst
   tolerance (each buffer is `NET_MAX_FRAME_LEN` ≈ 1.5 KiB).
-- **MAC address** — override `BOARD_MAC_*`, or change `bsp_get_mac_address()`.
+- **MAC address** — provisioned in flash (see **Production provisioning**), or
+  override `BOARD_MAC_*` / `bsp_get_mac_address()` for the UID‑derived fallback.
 - **Forwarding** — `ADIN_DAISY_CHAIN_MODE` (endpoint vs daisy‑chain switch),
   `NET_FDB_MAX_ENTRIES` (learned entries, ≤ 14), `NET_FDB_AGE_MS` (entry idle
   timeout).

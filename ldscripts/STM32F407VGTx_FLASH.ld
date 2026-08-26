@@ -1,6 +1,9 @@
 /*
  * Linker script for STM32F407VGTx
- *   FLASH : 1024 KB @ 0x08000000
+ *   FLASH : 896 KB @ 0x08000000  (sectors 0..10; code/rodata/data)
+ *   CONFIG:  128 KB @ 0x080E0000  (sector 11; reserved for the production
+ *                                  record, written out-of-band — never by the
+ *                                  build, so no section is placed here)
  *   RAM   :  128 KB @ 0x20000000  (main SRAM: SRAM1+SRAM2)
  *   CCMRAM:   64 KB @ 0x10000000  (core-coupled, not DMA/USB accessible)
  */
@@ -13,10 +16,14 @@ _Min_Stack_Size = 0x800;   /* main()/ISR stack before scheduler starts     */
 
 MEMORY
 {
-  FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
+  FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 896K
+  CONFIG (r)   : ORIGIN = 0x080E0000, LENGTH = 128K
   RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
   CCMRAM (xrw) : ORIGIN = 0x10000000, LENGTH = 64K
 }
+
+/* Reserved production-record sector (must match PRODINFO_FLASH_ADDR). */
+_prodinfo_start = ORIGIN(CONFIG);
 
 SECTIONS
 {
